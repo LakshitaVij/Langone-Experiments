@@ -1,0 +1,63 @@
+
+The idea behind CBAM comes from a 2018 paper by Woo et al., called CBAM: Convolutional Block Attention Module
+
+Their abstract says: "Given an intermediate feature map, our module se-
+quentially infers attention maps along two separate dimensions, channel
+and spatial, then the attention maps are multiplied to the input feature
+map for adaptive feature refinement."
+
+Essentially how we have operationalised it here is as follows:
+- After ResNet has processed the MRI partway , on ResNet's layer 4 (since it has the richest, most meaningful features), we create two maps on this a channel map and a spatial map.
+- A channel map has 2048 detector , one per feature detector, to be able to understand which detectors matter.
+- (batch, 2048, H, W, D)→ average H,W,D → (batch, 2048). We average across H, W, D (spatial dimensions) to get one number per channel
+- Clinical data (17 features) is combined with channel summary (2048 numbers) -> compressed to 128 -> expanded back to 2048 weights. The compression prevents overfitting
+- A spatial map has H x W x D numbers, one per location, which asks which locations matter.
+- (batch, 2048, H, W, D) → average 2048 channels → (batch, 1, H, W, D). We average across 2048 channels to get one number per location
+- Spatial attention takes already filtered features from channel attention filter and creates a 3D map of the MRI, using the clinical data as a global bias, to devide which spatial locations deserve more focus.
+- Through this global bias, high-risk patients have their entire spatial map shifted up, and the model is more alert everywhere. Low-risk patients have it shifted down, and the model is more relaxed everywhere.
+- We use a 3D convolution layer to not only take into account specific pixels but also its neighours to see to what extent a certain region is impacted.
+- The two filters work sequentially, channel first and spatial second so the final result is features that are both the right type and in the right place.
+
+
+We did two versions of it:
+Frozen: only CBAM attention layers and classifier learn, and the ResNet weights never change.
+
+Unfrozen: everything learns together, ResNet + CBAM + classifier all update during training.
+
+
+Flowchart:
+
+MRI scan
+    │
+    ▼
+┌─────────────────────────────────┐
+│  ResNet (layer1 → 2 → 3 → 4)   │
+└─────────────────────────────────┘
+    │
+    ▼ (batch, 2048, H, W, D)
+┌─────────────────────────────────┐
+│     Channel Attention (WHAT?)   │◄── Clinical data (17 features)
+│  2048 channels → 2048 weights   │    17+2048 → 128 → 2048
+│  amplify right channels         │
+└─────────────────────────────────┘
+    │
+    ▼ (batch, 2048, H, W, D)
+┌─────────────────────────────────┐
+│     Spatial Attention (WHERE?)  │◄── Clinical data (17 features)
+│  H×W×D locations → H×W×D weights│   17 → 64 → 1 (global bias)
+│  amplify right locations        │   + 3D conv (local refinement)
+└─────────────────────────────────┘
+    │
+    ▼ (batch, 2048, H, W, D)
+┌─────────────────────────────────┐
+│         avgpool                 │
+└─────────────────────────────────┘
+    │
+    ▼ (batch, 2048)
+┌─────────────────────────────────┐
+│     fc → cancer yes/no          │
+└─────────────────────────────────┘
+
+Results:
+Frozen CBAM : 0.842
+Unfrozen CBAM: started at 0.78, then started declining
