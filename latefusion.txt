@@ -1,13 +1,13 @@
 
 Late fusion is when we are combining after both modalities have produced their final probability score. Here, we take the imaging model, and the tabular model to aim to get a better prediction than either model alone.
 
-The Imaging model is essentially a ResNet that looked at MRI scans, and has its predictions saved in a CSV 
+The Imaging model is essentially a ResNet that looks at MRI scans, and has its predictions saved in a CSV 
 The tabular model is a sklearn model trained on clinical features, saved as a pkl file.
 
 The script loads both, runs them on the same 1718 test patients and then attempts late fusion in three ways:
 1. Simple Average (50/50)
-    - For each patient, add imaging score and tabular score together and then divide by 2
-    - Utility : Averaging could potentially smooth out individual errors made by imaging and tabular data 
+    - For each patient, add the imaging score and the tabular score together and then divide by 2
+    - Utility: Averaging could potentially smooth out individual errors made by imaging and tabular data 
     - Why not optimal: Assumes that imaging and tabular are equally good. 
 
 2. Weighted Average (Learn the best ratio of combination)
@@ -16,12 +16,12 @@ The script loads both, runs them on the same 1718 test patients and then attempt
     - Why not optimal: Assumes that the relationship is always linear 
 
 3. Logistic Regression (Learn optimal combination)
-    - Instead of manually finding the best combination, we let the model learn it. Here we did it by using cross-validation, and splitting 1718 patients into 5 groups, trained the combination formula on 4 groups, tested it on the 5th group, and repeated it 5 times so there is no bias in the way the test group is selected.
+    - Instead of manually finding the best combination, we let the model learn it. Here we did it by using cross-validation, and splitting 1718 patients into 5 groups, trained the combination formula on 4 groups, tested it on the 5th group, and repeated it 5 times, so there is no bias in the way the test group is selected.
     - Essentially works on seeing how much to trust imaging, how much to trust tabular and a bias adjustment
-    - It is more optimal than weighted average because unlike it, it never predicts on patients its trained on. That is also why its AUC is slightly lower
-    - Why not optimal: Assumes that the relationship is always linear, and still applies the same weights to every patient regardless of their clinical profile.
+    - It is more optimal than weighted average because, unlike it, it never predicts on patients it was trained on. That is also why its AUC is slightly lower
+    - Why not optimal: Assumes that the relationship is always linear and still applies the same weights to every patient regardless of their clinical profile.
 
-Optimal would be to have a non-linear model which adapts , such as a neural networ that takes both scores as inputs and learns complex non-linear relationships between them. However, doing so on this many patients runs the ris of overfitting too much, so logistic regression stands as the best choice given our data size. 
+Optimal would be to have a non-linear model which adapts, such as a neural network that takes both scores as inputs and learns complex non-linear relationships between them. However, doing so on this many patients runs the risk of overfitting too much, so logistic regression stands as the best choice given our data size. 
 
 
 
