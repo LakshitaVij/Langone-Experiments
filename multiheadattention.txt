@@ -74,6 +74,6 @@ fc: 64 → 128 → 2
 cancer yes/no
 
 Results:
-AUC : 0.842
+AUC : 0.8430
 
 ResNet branches kept frozen here as well
