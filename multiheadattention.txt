@@ -1,0 +1,79 @@
+
+Multihead attention is essentially a token based transformer where every piece of information, imaging and clinical, becomes an equal participant.
+- Here we have 19 tokens:
+    - 2 imaging tokens (T2 branch → 2048 → 64, DWI branch → 2048 → 64)
+    - 17 clinical tokens (each feature → 1 → 64)
+    - All projected to same size (64) so they can be communicating in an equivalent manner
+- Previously we only had 2 tokens (T2 and DWI). With 19 tokens, PSA can directly attend to T2 features, PIRADS can directly attend to DWI features, clinical features can attend to each other, so it leads to much richer relationship learning.
+
+- The 64 number tokens for each of the 19 "participants" go through a learned linear projection that rearranges the numbers so that related information ends up in the same slice before the heads split it.
+- The 64 numbers per token  then get split into 4 groups of 16, and each head independently computes attention over all 19 tokens using only its 16 numbers. 
+- Each head outputs 16 numbers per token, and so we again get 64 numbers per token
+- However, now each token has updated its opinion based on what it has learned from all 19 tokens across all 4 heads
+- We add the original token back to the attended token so each participant combines their original knowledge with what they learned from others
+- Then we normalise it to keep numbers stable
+
+- Then, we average all 19 updated tokens to get one singular 64 number summary 
+- 64 -> 128 -> 2  
+    - we expand 64 to 128 to learn complex patterns 
+    - use ReLU activation
+    - drop 20% to prevent overfitting
+    - compress to 2 numbers [probability of no cancer, probability of cancer], and whichever is higher, wins 
+
+
+
+Flow :
+
+
+Clinical features (17)          MRI scan
+        │                           │
+        │                    ┌──────┴──────┐
+        │                    ▼             ▼
+        │              T2 branch      DWI branch
+        │              (ResNet)       (ResNet)
+        │                    │             │
+        │                    ▼             ▼
+        │               2048 nums     2048 nums
+        │                    │             │
+        │              Linear(2048,64) Linear(2048,64)
+        │                    │             │
+        │                    ▼             ▼
+        │               img token 1   img token 2
+        │                    │             │
+        ▼                    └──────┬──────┘
+each feature → Linear(1,64)        │
+        │                          │
+        ▼                          │
+17 clinical tokens ────────────────┘
+        │
+        ▼
+stack all 19 tokens (batch, 19, 64)
+        │
+        ▼
+learned linear projection (rearrange numbers)
+        │
+        ▼
+split into 4 heads (each sees 16 numbers per token)
+        │
+        ▼
+each head: attention over all 19 tokens
+        │
+        ▼
+concatenate 4 heads → (batch, 19, 64)
+        │
+        ▼
+residual connection + LayerNorm
+        │
+        ▼
+average all 19 tokens → (batch, 64)
+        │
+        ▼
+fc: 64 → 128 → 2
+        │
+        ▼
+cancer yes/no
+
+Results:
+AUC : 0.842
+
+ResNet branches kept frozen here as well
