@@ -1,0 +1,55 @@
+Early fusion essentially aims to let clinical data guide how ResNet processes the MRI. 
+Instead of combining at the end like late fusion, we inject clinical information into the imaging pipeline so the two modalities interact during feature extraction.
+
+- Clinical data goes into each ResNet branch separately after layer4 of ResNet but before avgpool. Both T2 branch and DWI branch each get guided by clinical data independently, then their outputs concatenate as usual.
+
+- After ResNet layer4, each branch has a 3D grid of numbers, with each cell having 2048 numbers. 
+- The clinical data produces one number.
+- We take that one number and multiply every single cell in the entire 3D cube by that number.
+- After the scaling, avgpool collapses the entire 3D cube into one 2048 number vector, the branch's final output.
+- Then both branches , T2 and DWI , combine their outputs by concatenating
+  - 2048 + 2048 = 4096 
+- fc: 4096 -> 256 -> 2 [probability of cancer, probability of no cancer]
+
+Why this does not work well:
+The scalar is the same for every cell in the cube.So we get the same result as if we had no clinical guidance at all, just slightly brighter or dimmer.
+
+Flowchart:
+
+MRI scan
+    │
+    ├──────────────────┐
+    ▼                  ▼
+T2 branch          DWI branch (ADC + b1500 stacked)
+(ResNet layers 1-4) (ResNet layers 1-4)
+    │                  │
+    ▼                  ▼
+(batch, 2048, H, W, D) (batch, 2048, H, W, D)
+    │                  │
+    ▼                  ▼
+    × scalar           × scalar
+    ▲                  ▲
+    └────────┬─────────┘
+             │
+Clinical data (17 numbers)
+→ MLP (17 → 64 → 1)
+→ 1 scalar (0 to 1)
+→ sigmoid
+             │
+    ▼                  ▼
+avgpool            avgpool
+(batch, 2048)      (batch, 2048)
+    │                  │
+    └────────┬──────────┘
+             ▼
+     concatenate (batch, 4096)
+             │
+             ▼
+        fc: 4096 → 256 → 2
+             │
+             ▼
+        cancer yes/no
+
+Result:
+AUC : 0.8428
+
