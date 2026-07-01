@@ -1,0 +1,107 @@
+
+## Overview
+The tabular model is a HistGradientBoostingClassifier (sklearn) trained on 37 clinical and lesion-based features per patient.
+
+HistGradientBoosting is used because:
+- It handles missing values natively
+- More powerful than logistic regression for tabular data
+- Fast, no GPU needed
+
+**Feature engineering:**
+- Lesion slots: Takes top 3 by PIRADS descending
+- Zone parsing: 4 categories (peripheral, transition, central, other) with double-counting for multi-zone lesions
+  - Multi-zone lesions (e.g., "peripheral extending into transition") now captured via primary + secondary zone columns
+  - Cleaner anatomy: dropped location transverse feature entirely
+
+**Exclusion criteria (applied at cohort level):**
+- Removed rows where has_hip_implant == True (82 rows)
+- Removed rows where has_prior_pca_treatment == True (0 rows)
+
+**Final dataset:**
+- 8,254 labeled rows → 8,172 after exclusions (98.0%)
+- csPCa balance: 50.9% positive, 49.1% negative
+
+## Features (37 total)
+
+### Clinical (13 features)
+1. maxPIRADS
+2. psa_log
+3. psa_present
+4. psa_density
+5. prostate_volume_cc
+6. prostate_volume_present
+7. intra_vesical_protrusion_cm
+8. intra_vesical_protrusion_present
+9. prior_prostate_procedure_clean
+10. prior_prostate_procedure_present
+11. lesion_count
+12. lesion_max_size_mm
+13. lesion_has_epe
+
+### Per-Lesion Features (24 total: 3 slots × 8 features/slot)
+
+**For each of 3 lesion slots (lesion_1, lesion_2, lesion_3):**
+
+Primary features (5):
+- `lesion_N_pirads`
+- `lesion_N_zone_peripheral` (one-hot encoded)
+- `lesion_N_zone_transition` (one-hot encoded)
+- `lesion_N_zone_central` (one-hot encoded)
+- `lesion_N_zone_other` (one-hot encoded)
+
+Secondary zone features (3, for multi-zone lesions):
+- `lesion_N_zone_secondary_peripheral` (one-hot encoded)
+- `lesion_N_zone_secondary_transition` (one-hot encoded)
+- `lesion_N_zone_secondary_central` (one-hot encoded)
+
+## Training
+
+- **Algorithm:** HistGradientBoostingClassifier (max_iter=1000, early_stopping=True)
+- **CV strategy:** 5-fold StratifiedGroupKFold grouped by PatientID
+  - Grouped because 115 patients had rows spanning train/val/test; using raw split column would leak patient info across folds
+- **Model output:** Saved as cspca_model_v4.pkl via joblib
+
+## Results
+
+**Cross-validated AUC: 0.8223 (±0.0089)**
+
+Fold-wise AUC:
+- Fold 1: 0.8106
+- Fold 2: 0.8341
+- Fold 3: 0.8241
+- Fold 4: 0.8139
+- Fold 5: 0.8287
+
+**Top 5 features by permutation importance:**
+1. lesion_1_pirads: 0.164
+2. psa_density: 0.039
+3. prostate_volume_cc: 0.038
+4. lesion_max_size_mm: 0.028
+5. lesion_1_zone_peripheral: 0.019
+
+**Comparison to prior versions:**
+- v1 (17 features): CV AUC 0.8165
+- v3 (41 features): CV AUC 0.8225
+- v4 (37 features): CV AUC 0.8223
+
+
+## Scripts
+
+- Feature builder: cspca_july1.py (input: raw dataset → output: cspca_july1.py)
+- Training: fintabv4.py (input: cspca_features_v4.csv → output: cspca_model_v4.pkl)
+
+## Zone Parsing Logic (v4)
+
+The zone parser converts ~500 unique free-text radiologist zone descriptions into 4 mutually exclusive categories:
+
+1. **Peripheral (PZ):** 67.6% of lesions
+2. **Transition (TZ):** 21.5%
+3. **Central (CZ):** 2.8%
+4. **Other:** 3.0% (location-only descriptions like "apex", "seminal vesicle"; rare entire-gland cases)
+
+For multi-zone lesions (e.g., "peripheral extending into transition"):
+- Primary zone: first zone keyword found (captures dominant location)
+- Secondary zone: second zone keyword if present (captures extension/involvement)
+- Example: "peripheral with extension into transition zone" → primary=peripheral, secondary=transition
+
+Entire-gland lesions ("entire prostate", "diffuse throughout") are assigned to "other" primary zone and flagged via secondary zones if applicable. These are rare (3 patients).
