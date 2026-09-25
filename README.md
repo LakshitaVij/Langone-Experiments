@@ -53,7 +53,7 @@ Before running, check each config for:
 
 Training uses early stopping + checkpointing on `best_val_pirads_auc`.
 
-## Probability-level late fusion (optional)
+## Probability-level late fusion
 
 The three architectures above fuse imaging + clinical *embeddings* inside
 one joint network. `late_fusion.py` is a different, simpler strategy:
