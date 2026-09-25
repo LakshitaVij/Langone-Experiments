@@ -39,8 +39,8 @@ def parse_imaging_prob(pred_str):
 def main():
     # ── 1. load imaging predictions ─────────────────────────────────────────
     print("Loading imaging predictions...")
-    img_df = pd.read_csv(IMAGING_PREDS)
-    img_df["imaging_score"] = img_df["Predictions"].apply(parse_imaging_prob)
+    img_df = pd.read_csv(IMAGING_PREDS) 
+    img_df["imaging_score"] = img_df["Predictions"].apply(parse_imaging_prob) 
     img_df = img_df[["AccessionNumber", "imaging_score", "Targets"]].copy()
     img_df["AccessionNumber"] = img_df["AccessionNumber"].astype(str)
     print(f"  Imaging patients: {len(img_df)}")
@@ -54,7 +54,7 @@ def main():
     tab_test = tab_df[tab_df["AccessionNumber"].isin(img_df["AccessionNumber"])].copy()
     print(f"  Tabular patients (overlap): {len(tab_test)}")
 
-    # build feature matrix (same logic as training script)
+    # build feature matrix 
     feature_cols = [c for c in tab_test.columns if c not in ID_AND_METADATA]
     X_tab = pd.get_dummies(tab_test[feature_cols], columns=["lesion_max_zone"], dummy_na=True)
 
@@ -63,7 +63,7 @@ def main():
         tab_model = pickle.load(f)
 
     # align columns in case get_dummies produces different columns than training
-    # (safe to fill missing with 0 — unseen categories)
+    # (Fill missing with 0)
     trained_cols = tab_model.feature_names_in_ if hasattr(tab_model, "feature_names_in_") else X_tab.columns
     X_tab = X_tab.reindex(columns=trained_cols, fill_value=0)
 

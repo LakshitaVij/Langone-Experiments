@@ -7,7 +7,7 @@ from src.models.ResNet3D.base_3Dresnet import ResNetBranch
 
 
 class ResNetBranchEarly(ResNetBranch):
-    def __init__(self, block, layers, in_chans, tabular_dim=17):
+    def __init__(self, block, layers, in_chans, tabular_dim=37):
         super().__init__(block, layers, in_chans)
         # MLP: 17 clinical numbers → 1 attention scalar per spatial location
         self.spatial_attn = nn.Sequential(
@@ -29,9 +29,6 @@ class ResNetBranchEarly(ResNetBranch):
         # clinical features create spatial attention map to guide ResNet features
         _, _, H, W, D = out.shape
         attn = self.spatial_attn(tabular_features)              # (batch, 1)
-        attn = attn.unsqueeze(-1).unsqueeze(-1).unsqueeze(-1)   # (batch, 1, 1, 1, 1)
-        attn = attn.expand(-1, -1, H, W, D)                     # (batch, 1, H, W, D)
-        attn = torch.sigmoid(attn)                               # scale to 0-1
         out = out * attn                                         # guided features
 
         out = self.avgpool(out)

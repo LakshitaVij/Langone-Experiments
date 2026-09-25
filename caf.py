@@ -1,3 +1,13 @@
+"""
+Cross-attention fusion model for csPCa detection.
+Tabular features attend over imaging branch features via multi-head attention.
+
+Architecture:
+- Two ResNet branches (T2 + stacked ADC/b1500) → image features (batch, num_branches, 2048)
+- Tabular MLP (17 → 64 → 32) → tabular features (batch, 32)
+- Cross-attention: tabular queries, image keys/values → attended image (batch, 64)
+- Classifier: attended image + tabular → 2 classes
+"""
 import torch
 import torch.nn as nn
 
@@ -18,7 +28,7 @@ class CrossAttentionFusionModel(Base3DResNet):
         series_set = set(self.series)
         self.stack_adc_b1500 = self.stack_adc_b1500 and set(self.DWI_KEYS).issubset(series_set)
 
-        # ── imaging branches ─────────────────────────────────────────────────
+        # ── imaging branches (identical to TriSeriesModel) ───────────────────
         self.branches = nn.ModuleDict()
         self.branch_specs = []
         self.num_branches = 0
@@ -36,49 +46,33 @@ class CrossAttentionFusionModel(Base3DResNet):
             self.branch_specs.append((key, (key,)))
             self.num_branches += 1
 
-        # ── token projections ────────────────────────────────────────────────
-        self.embed_dim = 64
-        self.num_clinical = 37
-
-        # project each imaging branch (2048) → token (64)
-        self.img_proj = nn.Linear(2048, self.embed_dim)
-
-
-        # project each clinical feature (1 scalar) → token (64)
-        self.clinical_proj = nn.Linear(1, self.embed_dim)
-        """
-        How it projects 1 scalar into 64 tokens is by taking the one clinical number and
-        multiplying it by 64 different numbers, with each number representing a different aspect of 
-        the clinical feature that the model learned is useful for cspca prediction.
-
-        These numbers are randomly initialised when the model is created, and 
-        progressively become helpful. Everytime the model makes a wrong prediction, backpropagation nudges 
-        all 64 weights slightly so the next prediction is better. After thousands of patients, the weights converge to values that are genuinely useful.
-
-        """
-
-        # ── multi-head attention ─────────────────────────────────────────────
-        # total tokens = num_branches (2) + num_clinical (37) = 39
-        self.multihead_attn = nn.MultiheadAttention(
-            embed_dim=self.embed_dim,
-            num_heads=4,
-            dropout=config["hyperparameters"]["dropout"],
-            batch_first=True,
+        # ── tabular encoder ──────────────────────────────────────────────────
+        self.tabular_encoder = nn.Sequential(
+            nn.Linear(17, 64),
+            nn.ReLU(),
+            nn.Linear(64, 32),
+            nn.ReLU(),
         )
 
-        # layer norm for stability
-        self.norm = nn.LayerNorm(self.embed_dim)
+        # ── cross-attention ──────────────────────────────────────────────────
+        # query: tabular (32-dim), key/value: image branches (2048-dim each)
+        # project all to same dim (64) for attention
+        self.query_proj = nn.Linear(32, 64)
+        self.key_proj = nn.Linear(2048, 64)
+        self.value_proj = nn.Linear(2048, 64)
+        self.attn_scale = 64 ** 0.5
 
         # ── classifier ───────────────────────────────────────────────────────
+        # attended image (64) + tabular (32) → 2 classes
         self.dropout = nn.Dropout(p=config["hyperparameters"]["dropout"])
         self.fc = nn.Sequential(
-            nn.Linear(self.embed_dim, 128),
+            nn.Linear(64 + 32, 128),
             nn.ReLU(),
             self.dropout,
             nn.Linear(128, 2),
         )
 
-        # backwards-compatible attributes
+        # backwards-compatible attributes for existing utilities (e.g. Grad-CAM)
         if "axt2" in self.branches:
             self.resnet_single_branch = self.branches["axt2"]
         elif self.branch_specs:
@@ -87,39 +81,37 @@ class CrossAttentionFusionModel(Base3DResNet):
             self.resnet_dual_branch1 = self.branches["adc_b1500"]
 
     def forward(self, data_dict, tabular_features):
-        # ── 1. imaging tokens ────────────────────────────────────────────────
-        img_tokens = []
+        # ── 1. extract image features from each branch ───────────────────────
+        branch_features = []
         for branch_name, keys in self.branch_specs:
             if len(keys) > 1:
                 inputs = torch.cat([data_dict[k] for k in keys], dim=1)
             else:
                 inputs = data_dict[keys[0]]
-            feat = self.branches[branch_name](inputs)   # (batch, 2048)
-            token = self.img_proj(feat)                 # (batch, 64)
-            img_tokens.append(token.unsqueeze(1))       # (batch, 1, 64)
+            branch_features.append(self.branches[branch_name](inputs))
+        # stack into (batch, num_branches, 2048)
+        img = torch.stack(branch_features, dim=1)
 
-        img_tokens = torch.cat(img_tokens, dim=1)       # (batch, num_branches, 64)
+        # ── 2. encode tabular features ───────────────────────────────────────
+        tab = self.tabular_encoder(tabular_features)  # (batch, 32)
 
-        # ── 2. clinical tokens ───────────────────────────────────────────────
-        # each of 37 clinical features → its own token
-        clinical_tokens = []
-        for i in range(self.num_clinical):
-            feat = tabular_features[:, i].unsqueeze(1)  # (batch, 1)
-            token = self.clinical_proj(feat)             # (batch, 64)
-            clinical_tokens.append(token.unsqueeze(1))  # (batch, 1, 64)
+        # ── 3. cross-attention ───────────────────────────────────────────────
+        # query: tabular → (batch, 1, 64)
+        Q = self.query_proj(tab).unsqueeze(1)
+        # keys/values: image branches → (batch, num_branches, 64)
+        K = self.key_proj(img)
+        V = self.value_proj(img)
 
-        clinical_tokens = torch.cat(clinical_tokens, dim=1)  # (batch, 37, 64)
+        # attention scores: (batch, 1, num_branches)
+        attn_scores = torch.bmm(Q, K.transpose(1, 2)) / self.attn_scale
+        attn_weights = torch.softmax(attn_scores, dim=-1)
 
-        # ── 3. stack all tokens ──────────────────────────────────────────────
-        tokens = torch.cat([img_tokens, clinical_tokens], dim=1)  # (batch, 19, 64)
+        # attended image: (batch, 1, 64) → (batch, 64)
+        attended = torch.bmm(attn_weights, V).squeeze(1)
 
-        # ── 4. multi-head attention ──────────────────────────────────────────
-        attended, _ = self.multihead_attn(tokens, tokens, tokens)  # (batch, 19, 64)
-        attended = self.norm(attended + tokens)                     # residual connection
-
-        # ── 5. pool and classify ─────────────────────────────────────────────
-        pooled = attended.mean(dim=1)   # (batch, 64)
-        out = self.fc(pooled)           # (batch, 2)
+        # ── 4. classify ──────────────────────────────────────────────────────
+        x = torch.cat([attended, tab], dim=1)  # (batch, 96)
+        out = self.fc(x)
         return out
 
     def training_step(self, batch, batch_idx):
@@ -164,10 +156,17 @@ class CrossAttentionFusionModel(Base3DResNet):
         return {"test_loss": loss}
 
     def on_train_start(self):
-        # Keep ResNet branches frozen — only train attention + projections + fc
-        print("Freezing ResNet branches (permanent)...")
+        print("Freezing ResNet branches for first 10 epochs...")
         for name, param in self.named_parameters():
-            if "branches" in name:
+            if not name.startswith("fc") and \
+               not name.startswith("tabular_encoder") and \
+               not name.startswith("query_proj") and \
+               not name.startswith("key_proj") and \
+               not name.startswith("value_proj"):
                 param.requires_grad = False
-            else:
+
+    def on_train_epoch_start(self):
+        if self.current_epoch == 10:
+            print("Unfreezing all parameters...")
+            for param in self.parameters():
                 param.requires_grad = True

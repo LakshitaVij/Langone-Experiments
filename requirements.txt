@@ -1,0 +1,24 @@
+# Core training stack (train.py, src/, the aug11* final architectures)
+torch
+pytorch-lightning
+torchmetrics>=0.11
+h5py
+numpy
+pandas
+scipy
+scikit-learn
+matplotlib
+pyyaml
+wandb
+
+# Used by the tabular-only baselines and hybrid XGBoost/SHAP scripts
+# (Tabulartrainsplit.py, fintab.py, hybrid_xgb_pred_as_feature.py,
+# hybrid_shap_values_input.py, run_hybrid_comparison.py)
+joblib
+xgboost
+shap
+
+# Version pins are intentionally loose since no environment.yml/lockfile was
+# ever committed for this project. If you need to exactly reproduce a past
+# result, check the checkpoint's training date against these packages'
+# release history rather than assuming the latest versions match.

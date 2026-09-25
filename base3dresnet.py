@@ -6,6 +6,19 @@ from src.models.ResNet3D.base_3Dresnet import Bottleneck
 from src.models.ResNet3D.base_3Dresnet import ResNetBranch
 
 
+class ResNetBranchPatch(ResNetBranch):
+    def forward(self, x):
+        out = self.conv1(x)
+        out = self.bn1(out)
+        out = self.relu(out)
+        out = self.maxpool(out)
+        out = self.layer1(out)
+        out = self.layer2(out)
+        out = self.layer3(out)
+        out = self.layer4(out)
+        return out  # (batch, 2048, 7, 23, 23) — no avgpool, no flatten
+
+
 class CrossAttentionFusionModel(Base3DResNet):
     DWI_KEYS = ("adc", "b1500")
 
@@ -18,7 +31,7 @@ class CrossAttentionFusionModel(Base3DResNet):
         series_set = set(self.series)
         self.stack_adc_b1500 = self.stack_adc_b1500 and set(self.DWI_KEYS).issubset(series_set)
 
-        # ── imaging branches ─────────────────────────────────────────────────
+        # imaging branches
         self.branches = nn.ModuleDict()
         self.branch_specs = []
         self.num_branches = 0
@@ -27,49 +40,54 @@ class CrossAttentionFusionModel(Base3DResNet):
         for key in self.series:
             if self.stack_adc_b1500 and key in self.DWI_KEYS:
                 if not self._dwi_branch_added:
-                    self.branches["adc_b1500"] = ResNetBranch(Bottleneck, [3, 4, 6, 3], 2)
+                    self.branches["adc_b1500"] = ResNetBranchPatch(Bottleneck, [3, 4, 6, 3], 2)
                     self.branch_specs.append(("adc_b1500", self.DWI_KEYS))
                     self.num_branches += 1
                     self._dwi_branch_added = True
                 continue
-            self.branches[key] = ResNetBranch(Bottleneck, [3, 4, 6, 3], 1)
+            self.branches[key] = ResNetBranchPatch(Bottleneck, [3, 4, 6, 3], 1)
             self.branch_specs.append((key, (key,)))
             self.num_branches += 1
 
-        # ── token projections ────────────────────────────────────────────────
+        # token projections
         self.embed_dim = 64
-        self.num_clinical = 37
+        self.num_clinical = 6
+        self.cls_token = nn.Parameter(torch.zeros(1, 1, self.embed_dim))
+        self.patch_cnn = nn.Sequential(
+            nn.Conv2d(2048, 512, kernel_size=3, stride=2, padding=1),
+            nn.ReLU(),
+            nn.Conv2d(512, self.embed_dim, kernel_size=3, stride=4, padding=1),
+            nn.ReLU(),
+        )
 
-        # project each imaging branch (2048) → token (64)
-        self.img_proj = nn.Linear(2048, self.embed_dim)
+        self.clinical_projs = nn.ModuleList([
+            nn.Sequential(nn.Linear(5, 32), nn.ReLU(), nn.Linear(32, self.embed_dim)),  # Group 1: PSA/volume
+            nn.Sequential(nn.Linear(4, 32), nn.ReLU(), nn.Linear(32, self.embed_dim)),  # Group 2: anatomy/history
+            nn.Sequential(nn.Linear(3, 32), nn.ReLU(), nn.Linear(32, self.embed_dim)),  # Group 3: global lesion
+            nn.Sequential(nn.Linear(8, 32), nn.ReLU(), nn.Linear(32, self.embed_dim)),  # Group 4: lesion 1
+            nn.Sequential(nn.Linear(8, 32), nn.ReLU(), nn.Linear(32, self.embed_dim)),  # Group 5: lesion 2
+            nn.Sequential(nn.Linear(8, 32), nn.ReLU(), nn.Linear(32, self.embed_dim)),  # Group 6: lesion 3
+        ])
 
-
-        # project each clinical feature (1 scalar) → token (64)
-        self.clinical_proj = nn.Linear(1, self.embed_dim)
-        """
-        How it projects 1 scalar into 64 tokens is by taking the one clinical number and
-        multiplying it by 64 different numbers, with each number representing a different aspect of 
-        the clinical feature that the model learned is useful for cspca prediction.
-
-        These numbers are randomly initialised when the model is created, and 
-        progressively become helpful. Everytime the model makes a wrong prediction, backpropagation nudges 
-        all 64 weights slightly so the next prediction is better. After thousands of patients, the weights converge to values that are genuinely useful.
-
-        """
-
-        # ── multi-head attention ─────────────────────────────────────────────
-        # total tokens = num_branches (2) + num_clinical (37) = 39
+        # multi-head attention
+        # total tokens = 1 CLS + 126 img (63 per branch × 2) + 6 clinical = 133
         self.multihead_attn = nn.MultiheadAttention(
             embed_dim=self.embed_dim,
             num_heads=4,
             dropout=config["hyperparameters"]["dropout"],
             batch_first=True,
         )
-
-        # layer norm for stability
         self.norm = nn.LayerNorm(self.embed_dim)
 
-        # ── classifier ───────────────────────────────────────────────────────
+        self.multihead_attn2 = nn.MultiheadAttention(
+            embed_dim=self.embed_dim,
+            num_heads=4,
+            dropout=config["hyperparameters"]["dropout"],
+            batch_first=True,
+        )
+        self.norm2 = nn.LayerNorm(self.embed_dim)
+
+        # classifier
         self.dropout = nn.Dropout(p=config["hyperparameters"]["dropout"])
         self.fc = nn.Sequential(
             nn.Linear(self.embed_dim, 128),
@@ -78,16 +96,8 @@ class CrossAttentionFusionModel(Base3DResNet):
             nn.Linear(128, 2),
         )
 
-        # backwards-compatible attributes
-        if "axt2" in self.branches:
-            self.resnet_single_branch = self.branches["axt2"]
-        elif self.branch_specs:
-            self.resnet_single_branch = self.branches[self.branch_specs[0][0]]
-        if self.stack_adc_b1500 and "adc_b1500" in self.branches:
-            self.resnet_dual_branch1 = self.branches["adc_b1500"]
-
     def forward(self, data_dict, tabular_features):
-        # ── 1. imaging tokens ────────────────────────────────────────────────
+        # imaging tokens
         img_tokens = []
         for branch_name, keys in self.branch_specs:
             if len(keys) > 1:
@@ -98,10 +108,9 @@ class CrossAttentionFusionModel(Base3DResNet):
             token = self.img_proj(feat)                 # (batch, 64)
             img_tokens.append(token.unsqueeze(1))       # (batch, 1, 64)
 
-        img_tokens = torch.cat(img_tokens, dim=1)       # (batch, num_branches, 64)
+        img_tokens = torch.cat(img_tokens, dim=1)       # (batch, 2, 64)
 
-        # ── 2. clinical tokens ───────────────────────────────────────────────
-        # each of 37 clinical features → its own token
+        # clinical tokens
         clinical_tokens = []
         for i in range(self.num_clinical):
             feat = tabular_features[:, i].unsqueeze(1)  # (batch, 1)
@@ -110,14 +119,14 @@ class CrossAttentionFusionModel(Base3DResNet):
 
         clinical_tokens = torch.cat(clinical_tokens, dim=1)  # (batch, 37, 64)
 
-        # ── 3. stack all tokens ──────────────────────────────────────────────
-        tokens = torch.cat([img_tokens, clinical_tokens], dim=1)  # (batch, 19, 64)
+        # stack all tokens
+        tokens = torch.cat([img_tokens, clinical_tokens], dim=1)  # (batch, 39, 64)
 
-        # ── 4. multi-head attention ──────────────────────────────────────────
-        attended, _ = self.multihead_attn(tokens, tokens, tokens)  # (batch, 19, 64)
-        attended = self.norm(attended + tokens)                     # residual connection
+        # multi-head attention
+        attended, _ = self.multihead_attn(tokens, tokens, tokens)
+        attended = self.norm(attended + tokens)  # residual connection
 
-        # ── 5. pool and classify ─────────────────────────────────────────────
+        # pool and classify
         pooled = attended.mean(dim=1)   # (batch, 64)
         out = self.fc(pooled)           # (batch, 2)
         return out
@@ -149,22 +158,7 @@ class CrossAttentionFusionModel(Base3DResNet):
                 self.log("val_loss", loss, prog_bar=True, on_step=True, on_epoch=True)
         return {"val_loss": loss}
 
-    def test_step(self, batch, batch_idx, dataloader_idx=0):
-        data_dict = batch["volume_data_dict"]
-        tabular = batch["tabular_features"]
-        target = batch["label"]
-        logits = self(data_dict, tabular)
-        loss = self.unweighted_loss(logits, target)
-        if dataloader_idx == 0:
-            self.val_preds["preds"].append(logits)
-            self.val_preds["targets"].append(target)
-            self.val_preds["maxPIRADS"].append(batch["maxPIRADS"])
-            self.val_preds["AccessionNumber"].append(batch["AccessionNumber"])
-            print("Test Loss", loss)
-        return {"test_loss": loss}
-
     def on_train_start(self):
-        # Keep ResNet branches frozen — only train attention + projections + fc
         print("Freezing ResNet branches (permanent)...")
         for name, param in self.named_parameters():
             if "branches" in name:
