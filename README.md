@@ -53,6 +53,30 @@ Before running, check each config for:
 
 Training uses early stopping + checkpointing on `best_val_pirads_auc`.
 
+## Probability-level late fusion (optional)
+
+The three architectures above fuse imaging + clinical *embeddings* inside
+one joint network. `late_fusion.py` is a different, simpler strategy:
+combine the output *probabilities* of a separately-trained imaging model and
+a separately-trained tabular-only model (simple average / weighted average /
+learned logistic regression), and compare each against the blend.
+
+```bash
+python late_fusion.py \
+    --imaging-preds /path/to/preds_epoch_N.csv \
+    --tabular-features /path/to/cspca_features_v4.csv \
+    --tabular-model /path/to/cspca_model_v4_trainonly.pkl \
+    --val-split-csv /path/to/val_split.csv \
+    --output-csv late_fusion_preds.csv
+```
+
+- `--imaging-preds` expects the per-patient predictions CSV that `train.py`'s
+  `trainer.test()` writes via `src/metrics/plot.py`'s `save_preds()` when a
+  config's `debugging.debug` is `true`.
+- `--tabular-model` expects a joblib-dumped `{"model", "feature_columns"}`
+  dict from a tabular-only classifier trained separately on the clinical
+  features CSV (not covered by anything else in this repo).
+
 ## `src/`
 
 The `src/` package (data loading, ResNet3D backbone, metrics) mirrors the
