@@ -11,9 +11,13 @@ location, etc.) using a frozen ResNet3D imaging backbone.
 | CBAM (channel + spatial clinical attention) | `aug11cbam.py` | `configs/cbam.yaml` | `cbam.md` |
 | Early-scalar clinical attention | `aug11earlyscalar.py` | `configs/earlyscalar.yaml` | `earlyscalar.md` |
 | Late fusion (flat clinical encoder) | `aug11latefusionflat.py` | `configs/latefusion_flat.yaml` | `latefusion.md` |
+| Probability-level late fusion | `late_fusion.py` | CLI args (see below) | — |
 
-Each `.md` file (with matching `.png` diagram) explains the design. This
-README only covers how to run them.
+The first three fuse imaging + clinical *embeddings* inside one joint
+network, trained via `train.py`; each has a `.md` writeup (with matching
+`.png` diagram) explaining the design. Probability-level late fusion is
+different — it blends the output *probabilities* of two independently
+trained models instead — so it runs as its own script, covered further down.
 
 ## Setup
 
@@ -55,10 +59,8 @@ Training uses early stopping + checkpointing on `best_val_pirads_auc`.
 
 ## Probability-level late fusion
 
-The three architectures above fuse imaging + clinical *embeddings* inside
-one joint network. `late_fusion.py` is a different, simpler strategy:
-combine the output *probabilities* of a separately-trained imaging model and
-a separately-trained tabular-only model (simple average / weighted average /
+Combine the output probabilities of a separately-trained imaging model and a
+separately-trained tabular-only model (simple average / weighted average /
 learned logistic regression), and compare each against the blend.
 
 ```bash
